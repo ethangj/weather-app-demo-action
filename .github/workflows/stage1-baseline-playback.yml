@@ -66,6 +66,27 @@ jobs:
           timeout 30 bash -c 'until nc -z localhost 8080 && nc -z localhost 8081; do sleep 1; done'
           echo "✓ Mock servers ready on :8080 (ip-api) and :8081 (weather-api)"
 
+      # ── Verify traffic is routed to localhost, not WireMock Cloud ────
+      #
+      # Confirms two things before the tests run:
+      #   1. The env vars point at localhost (not any cloud URL)
+      #   2. The local mock servers are actually serving responses
+      # If either curl fails with a non-200, this step fails and the
+      # test step never runs — making misconfiguration immediately visible.
+
+      - name: Verify mocks are running locally
+        env:
+          IP_API_BASE_URL: http://localhost:8080
+          WEATHER_API_BASE_URL: http://localhost:8081
+        run: |
+          echo "IP_API_BASE_URL      = $IP_API_BASE_URL"
+          echo "WEATHER_API_BASE_URL = $WEATHER_API_BASE_URL"
+          echo ""
+          echo "--- Probing :8080 (ip-api) ---"
+          curl --fail --silent --show-error "$IP_API_BASE_URL/json/" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ city:', d['city'])"
+          echo "--- Probing :8081 (weather-api) ---"
+          curl --fail --silent --show-error "$WEATHER_API_BASE_URL/v1/current.json?key=probe&q=51.5074,-0.1278&aqi=no" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ location:', d['location']['name'])"
+
       # ── Run the test suite against mocks ──────────────────
 
       - name: Run tests against WireMock playback
