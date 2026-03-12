@@ -10,15 +10,34 @@
 Do all of this the morning of the event, not 5 minutes before.
 
 ### WireMock Cloud
+
+**Important:** `wiremock environments create` creates **empty** mock APIs in WireMock Cloud.
+It provisions the cloud resources and writes the profile file — it does **not** copy or inherit
+stubs from the base mock APIs. You must seed the CI environment stubs separately (step 4 below).
+
 - [ ] WML-IP API (`mkg1g`) exists and has the London stub
 - [ ] WML-Weather API (`49o3r`) exists and has the dynamic London weather stub
-- [ ] CI environment created — run locally:
+- [ ] Pull the base mock APIs locally (required before creating the environment):
+  ```bash
+  wiremock pull mock-api mkg1g --into ip-api
+  wiremock pull mock-api 49o3r --into weather-api
+  ```
+- [ ] Create the CI environment:
   ```bash
   wiremock environments create --profile ci
   ```
-  This creates "WML-IP API [ci]" and "WML-Weather API [ci]" in WireMock Cloud and writes real IDs into `.wiremock/wiremock-ci.yaml`
-- [ ] `.wiremock/wiremock-ci.yaml` committed with those real IDs
-- [ ] CI environment mock APIs have stubs — trigger Stage 3 once as a rehearsal run; it records live traffic into the CI environment so Stage 2 will work on the day
+  This creates "WML-IP API [ci]" and "WML-Weather API [ci]" as **empty** mock APIs in WireMock
+  Cloud, and writes their IDs into `.wiremock/wiremock-ci.yaml`. Commit that file.
+- [ ] Seed the CI environment mock APIs with stubs. Read the new IDs from `wiremock-ci.yaml`
+  then push the locally-pulled stubs up to each CI mock API:
+  ```bash
+  # Replace <CI_IP_API_ID> and <CI_WEATHER_API_ID> with the cloud_id values
+  # from the generated .wiremock/wiremock-ci.yaml
+  wiremock push mock-api ip-api --to=cloud:<CI_IP_API_ID>
+  wiremock push mock-api weather-api --to=cloud:<CI_WEATHER_API_ID>
+  ```
+  After this, Stage 2 will work immediately. Stage 3 will overwrite these seeds with
+  freshly recorded stubs on every run — that's intentional.
 
 ### GitHub repo
 - [ ] Secret `WIREMOCK_API_TOKEN` set (Settings → Secrets and variables → Actions → **Secrets**)
