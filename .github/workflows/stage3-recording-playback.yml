@@ -85,10 +85,21 @@ jobs:
           # Real API key required here so WeatherAPI requests actually succeed
           WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
 
+      # ── Stop recording container ────────────────────────────
+      #
+      # The action's container lifecycle runs cleanup in a post hook,
+      # meaning the record-many container is still holding ports 8080/8081
+      # when the next step runs. Stop it explicitly so the playback
+      # container can bind to the same ports.
+
+      - name: Stop recording container and flush stubs to WireMock Cloud
+        run: |
+          docker stop $(docker ps -q --filter "name=wiremock-runner") 2>/dev/null || true
+          echo "✓ Recording container stopped and stubs flushed to WireMock Cloud"
+
       # ── Pull freshly recorded stubs ─────────────────────────
       #
-      # At this point the runner has shut down and flushed all recordings
-      # to WireMock Cloud. Pull them back down to run in playback mode.
+      # Pull the stubs that were just flushed to WireMock Cloud.
 
       - name: Pull freshly recorded stubs from WireMock Cloud
         uses: ethangj/gha-test@main
