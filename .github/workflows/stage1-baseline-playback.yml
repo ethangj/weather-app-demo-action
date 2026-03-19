@@ -6,9 +6,11 @@
 # the test suite entirely against those mocks — no live APIs.
 #
 # Key concepts demonstrated:
-#   - Installing and authenticating the WireMock CLI in CI
-#   - Pulling mock APIs by hardcoded cloud ID
-#   - Running wiremock locally as a background process
+#   - Using the WireMock Runner GitHub Action to install, auth,
+#     and manage the WireMock CLI in CI
+#   - Pulling mock APIs by name (cloud IDs mkg1g / 49o3r are
+#     resolved from .wiremock/wiremock.yaml automatically)
+#   - Running WireMock locally as an ephemeral container
 #   - Pointing the test suite at WireMock playback ports
 # ============================================================
 
@@ -36,64 +38,64 @@ jobs:
       - name: Install app dependencies
         run: npm ci
 
-      # ── WireMock CLI setup ─────────────────────────────────
-
-      - name: Install WireMock CLI
-        run: npm install --global @wiremock/cli
-
-      - name: Authenticate with WireMock Cloud
-        # The API token is stored as a GitHub Actions secret.
-        # Retrieve yours from: https://app.wiremock.cloud/account/security
-        run: wiremock config set api_token "${{ secrets.WIREMOCK_API_TOKEN }}"
-
-      # ── Pull mock APIs by explicit ID ──────────────────────
+      # ── Pull mock APIs by service name ─────────────────────
       #
-      # We pull each mock API into the service slot already defined
-      # in .wiremock/wiremock.yaml, which guarantees the playback
-      # ports (8080, 8081) are consistent and known to the tests.
+      # The action installs the WireMock CLI, authenticates with
+      # WireMock Cloud, and runs `wiremock pull mock-api <name>`.
+      # The service names (ip-api, weather-api) are defined in
+      # .wiremock/wiremock.yaml with their cloud IDs (mkg1g, 49o3r),
+      # so ports (8080, 8081) are consistent and known to the tests.
       #
-      - name: Pull mock APIs from WireMock Cloud
-        run: |
-          wiremock pull mock-api mkg1g --into ip-api
-          wiremock pull mock-api 49o3r --into weather-api
 
-      # ── Start local playback ───────────────────────────────
+      - name: Pull ip-api stubs from WireMock Cloud
+        uses: ethangj/gha-test@main
+        with:
+          api-token: ${{ secrets.WIREMOCK_API_TOKEN }}
+          command: pull
+          mock-api: ip-api
 
-      - name: Start WireMock local playback
-        run: |
-          wiremock run &
-          # Wait until both mock API ports are accepting connections
-          timeout 30 bash -c 'until nc -z localhost 8080 && nc -z localhost 8081; do sleep 1; done'
-          echo "✓ Mock servers ready on :8080 (ip-api) and :8081 (weather-api)"
+      - name: Pull weather-api stubs from WireMock Cloud
+        uses: ethangj/gha-test@main
+        with:
+          api-token: ${{ secrets.WIREMOCK_API_TOKEN }}
+          command: pull
+          mock-api: weather-api
 
-      # ── Verify traffic is routed to localhost, not WireMock Cloud ────
+      # ── Start local playback, verify, and run tests ─────────
+      #
+      # The action starts a WireMock Runner container in serve mode,
+      # waits until both mock API ports are healthy, then executes
+      # the run: command. After the command exits the container is
+      # stopped automatically.
+      #
+      # The verify probe and test run are combined here because both
+      # require the container to be live.
       #
       # Confirms two things before the tests run:
       #   1. The env vars point at localhost (not any cloud URL)
       #   2. The local mock servers are actually serving responses
-      # If either curl fails with a non-200, this step fails and the
-      # test step never runs — making misconfiguration immediately visible.
+      #
 
-      - name: Verify mocks are running locally
-        env:
-          IP_API_BASE_URL: http://localhost:8080
-          WEATHER_API_BASE_URL: http://localhost:8081
-        run: |
-          echo "IP_API_BASE_URL      = $IP_API_BASE_URL"
-          echo "WEATHER_API_BASE_URL = $WEATHER_API_BASE_URL"
-          echo ""
-          echo "--- Probing :8080 (ip-api) ---"
-          curl --fail --silent --show-error "$IP_API_BASE_URL/json/" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ city:', d['city'])"
-          echo "--- Probing :8081 (weather-api) ---"
-          curl --fail --silent --show-error "$WEATHER_API_BASE_URL/v1/current.json?key=probe&q=51.5074,-0.1278&aqi=no" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ location:', d['location']['name'])"
-
-      # ── Run the test suite against mocks ──────────────────
-
-      - name: Run tests against WireMock playback
+      - name: Verify mocks are running locally and run tests
+        uses: ethangj/gha-test@main
+        with:
+          api-token: ${{ secrets.WIREMOCK_API_TOKEN }}
+          mode: serve
+          ports: "8080,8081"
+          run: |
+            echo "IP_API_BASE_URL      = $IP_API_BASE_URL"
+            echo "WEATHER_API_BASE_URL = $WEATHER_API_BASE_URL"
+            echo ""
+            echo "--- Probing :8080 (ip-api) ---"
+            curl --fail --silent --show-error "$IP_API_BASE_URL/json/" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ city:', d['city'])"
+            echo "--- Probing :8081 (weather-api) ---"
+            curl --fail --silent --show-error "$WEATHER_API_BASE_URL/v1/current.json?key=probe&q=51.5074,-0.1278&aqi=no" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ location:', d['location']['name'])"
+            echo ""
+            echo "→ Running tests against WireMock playback..."
+            npm test
         env:
           # Redirect both API clients to WireMock local playback ports
           IP_API_BASE_URL: http://localhost:8080
           WEATHER_API_BASE_URL: http://localhost:8081
           # Stubs don't match on the API key — any value satisfies the guard in api.ts
           WEATHER_API_KEY: mock-key
-        run: npm test

@@ -8,13 +8,14 @@
 #
 # Changes from Stage 2:
 #   - New "Record" phase added before the pull/run/test sequence
-#   - record-many starts proxy servers on the same ports as playback
-#   - The test suite is run once through the recording proxies
-#     (generating real API traffic) and once against the fresh mocks
+#   - The action starts a record-many container on the same ports
+#     as playback; tests run through the recording proxies
+#   - After recording, stubs are flushed to WireMock Cloud and
+#     pulled fresh before the playback phase begins
 #   - WEATHER_API_KEY (real key) is needed only in the recording phase
 #
 # Key concepts demonstrated:
-#   - Non-interactive record-many in a CI pipeline (SIGTERM shutdown)
+#   - Non-interactive record-many via the WireMock Runner action
 #   - Using the same test suite to generate recording traffic and validate stubs
 #   - Environment profiles spanning both recording and playback
 #   - The "always fresh" mocks pattern
@@ -44,119 +45,84 @@ jobs:
       - name: Install app dependencies
         run: npm ci
 
-      # ── WireMock CLI setup ─────────────────────────────────
-
-      - name: Install WireMock CLI
-        run: npm install --global @wiremock/cli
-
-      - name: Authenticate with WireMock Cloud
-        run: wiremock config set api_token "${{ secrets.WIREMOCK_API_TOKEN }}"
-
       # ── PHASE 1: Record fresh stubs from live APIs ─────────
+      #
+      # The action starts a WireMock Runner container in record-many mode,
+      # which proxies :8080 → ip-api.com and :8081 → api.weatherapi.com.
+      # After the run: command exits, the container shuts down gracefully,
+      # flushing all captured traffic to the WireMock Cloud CI environment.
       #
       # record-many reads .wiremock/wiremock.yaml to find:
       #   - Which ports to proxy on (8080, 8081)
       #   - Which live URLs to proxy to (originals.default)
       #
-      # The --profile flag tells it to save recorded stubs to the
+      # The profile flag tells it to save recorded stubs to the
       # CI environment's cloud mock API IDs (from wiremock-ci.yaml)
       # rather than the base production IDs.
-      #
-      # Non-interactive mode: the process responds to SIGTERM by
-      # flushing all captured traffic to WireMock Cloud then exiting.
 
-      - name: Start recording proxies (record-many)
-        run: |
-          wiremock record-many --profile ${{ vars.WIREMOCK_PROFILE }} \
-            --import-config-file=.wiremock/recording-config.yaml \
-            > record-many.log 2>&1 &
-          echo "RECORD_PID=$!" >> $GITHUB_ENV
-          # Wait until both recording proxies are ready
-          timeout 30 bash -c 'until nc -z localhost 8080 && nc -z localhost 8081; do sleep 1; done'
-          echo "✓ Recording proxies ready on :8080 (→ ip-api.com) and :8081 (→ api.weatherapi.com)"
-
-      # ── Verify recording proxies are running on localhost ─────────────
-
-      - name: Verify recording proxies are running locally
-        # Note: :8080 forwards to ip-api.com (no auth) so we can do a full round-trip probe.
-        # :8081 forwards to api.weatherapi.com (requires a real key) so we only confirm the
-        # port is open — making an authenticated request here would expose the key in logs.
-        env:
-          IP_API_BASE_URL: http://localhost:8080
-          WEATHER_API_BASE_URL: http://localhost:8081
-        run: |
-          echo "IP_API_BASE_URL      = $IP_API_BASE_URL  (→ proxies to ip-api.com)"
-          echo "WEATHER_API_BASE_URL = $WEATHER_API_BASE_URL  (→ proxies to api.weatherapi.com)"
-          echo ""
-          echo "--- Probing recording proxy :8080 (ip-api, no auth required) ---"
-          curl --fail --silent --show-error "$IP_API_BASE_URL/json/" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ city:', d['city'])"
-          echo "--- Confirming recording proxy :8081 port is open ---"
-          nc -z localhost 8081 && echo "✓ :8081 is listening (weather API proxy)"
-
-      - name: Run tests through recording proxies (captures live API traffic)
+      - name: Record live API traffic through proxies
+        uses: ethangj/gha-test@main
+        with:
+          api-token: ${{ secrets.WIREMOCK_API_TOKEN }}
+          mode: record-many
+          ports: "8080,8081"
+          profile: ${{ vars.WIREMOCK_PROFILE }}
+          run: |
+            echo "IP_API_BASE_URL      = $IP_API_BASE_URL  (→ proxies to ip-api.com)"
+            echo "WEATHER_API_BASE_URL = $WEATHER_API_BASE_URL  (→ proxies to api.weatherapi.com)"
+            echo ""
+            echo "--- Probing recording proxy :8080 (ip-api, no auth required) ---"
+            curl --fail --silent --show-error "$IP_API_BASE_URL/json/" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ city:', d['city'])"
+            echo "--- Confirming recording proxy :8081 port is open ---"
+            nc -z localhost 8081 && echo "✓ :8081 is listening (weather API proxy)"
+            echo ""
+            echo "→ Running tests against live APIs through recording proxies..."
+            npm test
         env:
           # Same ports as playback — the proxies forward to real APIs and record simultaneously
           IP_API_BASE_URL: http://localhost:8080
           WEATHER_API_BASE_URL: http://localhost:8081
           # Real API key required here so WeatherAPI requests actually succeed
           WEATHER_API_KEY: ${{ secrets.WEATHER_API_KEY }}
-        run: |
-          echo "→ Running tests against live APIs through recording proxies..."
-          npm test
 
-      - name: Stop recording and upload stubs to WireMock Cloud
-        run: |
-          echo "→ Sending SIGTERM to stop recording and flush stubs to WireMock Cloud..."
-          pkill -TERM -P $RECORD_PID 2>/dev/null || true
-
-          # Wait for graceful shutdown (stubs upload happens during shutdown)
-          TIMEOUT=30
-          COUNT=0
-          while kill -0 $RECORD_PID 2>/dev/null && [ $COUNT -lt $TIMEOUT ]; do
-            sleep 1
-            COUNT=$((COUNT + 1))
-          done
-
-          echo "=== record-many output ==="
-          cat record-many.log
-          echo "✓ Stubs uploaded to WireMock Cloud CI environment"
-
-      # ── PHASE 2: Pull fresh stubs and run in playback mode ─
+      # ── Pull freshly recorded stubs ─────────────────────────
+      #
+      # At this point the runner has shut down and flushed all recordings
+      # to WireMock Cloud. Pull them back down to run in playback mode.
 
       - name: Pull freshly recorded stubs from WireMock Cloud
-        run: |
-          wiremock pull mock-api --all --profile ${{ vars.WIREMOCK_PROFILE }}
-          echo "✓ Fresh stubs pulled from CI environment"
+        uses: ethangj/gha-test@main
+        with:
+          api-token: ${{ secrets.WIREMOCK_API_TOKEN }}
+          command: pull
+          all: "true"
+          profile: ${{ vars.WIREMOCK_PROFILE }}
 
-      - name: Start WireMock local playback
-        run: |
-          wiremock run &
-          timeout 30 bash -c 'until nc -z localhost 8080 && nc -z localhost 8081; do sleep 1; done'
-          echo "✓ Mock servers ready on :8080 (ip-api) and :8081 (weather-api)"
+      # ── PHASE 2: Pull fresh stubs and run in playback mode ──
+      #
+      # The action starts a WireMock Runner container in serve mode,
+      # waits until both mock API ports are healthy, then verifies
+      # responses and runs the full test suite against the fresh stubs.
 
-      # ── Verify traffic is routed to localhost playback, not WireMock Cloud ──
-
-      - name: Verify playback mocks are running locally
-        env:
-          IP_API_BASE_URL: http://localhost:8080
-          WEATHER_API_BASE_URL: http://localhost:8081
-        run: |
-          echo "IP_API_BASE_URL      = $IP_API_BASE_URL"
-          echo "WEATHER_API_BASE_URL = $WEATHER_API_BASE_URL"
-          echo ""
-          echo "--- Probing :8080 (ip-api) ---"
-          curl --fail --silent --show-error "$IP_API_BASE_URL/json/" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ city:', d['city'])"
-          echo "--- Probing :8081 (weather-api) ---"
-          curl --fail --silent --show-error "$WEATHER_API_BASE_URL/v1/current.json?key=probe&q=51.5074,-0.1278&aqi=no" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ location:', d['location']['name'])"
-
-      # ── Run the test suite against the freshly recorded mocks ──
-
-      - name: Run tests against WireMock playback (validates fresh stubs)
+      - name: Verify playback mocks are running locally and run tests
+        uses: ethangj/gha-test@main
+        with:
+          api-token: ${{ secrets.WIREMOCK_API_TOKEN }}
+          mode: serve
+          ports: "8080,8081"
+          run: |
+            echo "IP_API_BASE_URL      = $IP_API_BASE_URL"
+            echo "WEATHER_API_BASE_URL = $WEATHER_API_BASE_URL"
+            echo ""
+            echo "--- Probing :8080 (ip-api) ---"
+            curl --fail --silent --show-error "$IP_API_BASE_URL/json/" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ city:', d['city'])"
+            echo "--- Probing :8081 (weather-api) ---"
+            curl --fail --silent --show-error "$WEATHER_API_BASE_URL/v1/current.json?key=probe&q=51.5074,-0.1278&aqi=no" | python3 -c "import sys,json; d=json.load(sys.stdin); print('✓ location:', d['location']['name'])"
+            echo ""
+            echo "→ Running tests against freshly recorded WireMock stubs..."
+            npm test
         env:
           IP_API_BASE_URL: http://localhost:8080
           WEATHER_API_BASE_URL: http://localhost:8081
           # Stubs don't match on the key — any value works in playback
           WEATHER_API_KEY: mock-key
-        run: |
-          echo "→ Running tests against freshly recorded WireMock stubs..."
-          npm test

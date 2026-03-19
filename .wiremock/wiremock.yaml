@@ -12,7 +12,7 @@ services:
   ip-api:
     type: 'Unstructured'
     name: 'WML-IP API'
-    cloud_id: 'mkg1g'
+    cloud_id: 'z460e'
     path: './ip-api'
     port: 8080
     rewriteOriginHostname: false
@@ -22,7 +22,7 @@ services:
   weather-api:
     type: 'Unstructured'
     name: 'WML-Weather API'
-    cloud_id: '49o3r'
+    cloud_id: 'z460e'
     path: './weather-api'
     port: 8081
     rewriteOriginHostname: false

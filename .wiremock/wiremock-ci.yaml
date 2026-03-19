@@ -1,5 +1,5 @@
 services:
   ip-api:
-    cloud_id: 'k5911'
+    cloud_id: 'z460e'
   weather-api:
-    cloud_id: 'v921j'
+    cloud_id: 'z460e'
