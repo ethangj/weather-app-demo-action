@@ -12,7 +12,7 @@ services:
   ip-api:
     type: 'Unstructured'
     name: 'WML-IP API'
-    cloud_id: 'z460e'
+    cloud_id: 'wgo6e'
     path: './ip-api'
     port: 8080
     rewriteOriginHostname: false
